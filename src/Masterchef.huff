@@ -1,0 +1,793 @@
+/// @title Masterchef
+/// @author Viacheslav Khovrov <https://github.com/ViacheslavKhovrov>
+/// @notice Masterchef contract written in Huff based on <https://github.com/sushiswap/sushiswap/blob/271458b558afa6fdfd3e46b8eef5ee6618b60f9d/contracts/MasterChef.sol>
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////// IMPORTS /////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#include "huffmate/auth/Owned.huff"
+#include "huffmate/utils/SafeTransferLib.huff"
+#include "huffmate/math/SafeMath.huff"
+#include "huffmate/auth/NonPayable.huff"
+#include "huffmate/data-structures/Hashmap.huff"
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////// INTERFACE /////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define function poolLength() view returns (uint256)
+#define function add(uint256 allocPoint, address lpToken, bool withUpdate) nonpayable returns ()
+#define function set(uint256 pid, uint256 allocPoint, bool withUpdate) nonpayable returns ()
+#define function setMigrator(address migrator) nonpayable returns ()
+#define function migrate(uint256 pid) nonpayable returns ()
+#define function getMultiplier(uint256 from, uint256 to) view returns (uint256)
+#define function pendingSushi(uint256 pid, address user) view returns (uint256)
+#define function massUpdatePools() nonpayable returns ()
+#define function updatePool(uint256 pid) nonpayable returns ()
+#define function deposit(uint256 pid, uint256 amount) nonpayable returns ()
+#define function withdraw(uint256 pid, uint256 amount) nonpayable returns ()
+#define function emergencyWithdraw(uint256 pid) nonpayable returns ()
+#define function dev(address devaddr) nonpayable returns ()
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////// EVENTS //////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define event Deposit(address indexed user, uint256 indexed pid, uint256 amount)
+#define event Withdraw(address indexed user, uint256 indexed pid, uint256 amount)
+#define event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////// ERRORS //////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define error Unauthorized()
+#define error OutOfBounds()
+#define error NoMigrator()
+#define error CallFailed()
+#define error ReturnDataSizeIsZero()
+#define error BadMigrate()
+#define error WithdrawNotGood()
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////// CONSTANTS ///////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define constant BONUS_MULTIPLIER = 0x0a
+#define constant 1E_12 = 0xe8d4a51000
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////// STORAGE //////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define constant SUSHI_SLOT = FREE_STORAGE_POINTER()
+#define constant DEVADDR_SLOT = FREE_STORAGE_POINTER()
+#define constant BONUS_END_BLOCK_SLOT = FREE_STORAGE_POINTER()
+#define constant SUSHI_PER_BLOCK_SLOT = FREE_STORAGE_POINTER()
+#define constant MIGRATOR_SLOT = FREE_STORAGE_POINTER()
+#define constant POOL_INFO_SLOT = FREE_STORAGE_POINTER()    // PoolInfo[], struct PoolInfo: (address lpToken, uint256 allocPoint, uint256 lastRewardBlock, uint256 accSushiPerShare)
+#define constant USER_INFO_SLOT = FREE_STORAGE_POINTER()    // mapping(uint256 pid => mapping(address user => UserInfo)), struct UserInfo: (uint256 amount, uint256 rewardDebt)
+#define constant TOTAL_ALLOC_POINT_SLOT = FREE_STORAGE_POINTER()
+#define constant START_BLOCK_SLOT = FREE_STORAGE_POINTER()
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////// CONSTRUCTOR //////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define macro CONSTRUCTOR() = {
+    // Constructor arguments: 
+    // (address sushi, address devaddr, uint256 sushiPerBlock, uint256 startBlock, uint256 bonusEndBlock, address owner)
+    
+    // @dev can rewrite owned constructor here to reduce ops, but keep for now
+    OWNED_CONSTRUCTOR()
+    
+    // Copy arguments into memory
+    0xa0                        // [size] - byte size to copy
+    0xc0 codesize sub           // [offset, size] - offset in the code to copy from
+    0x00                        // [mem, offset, size] - offset in memory to copy to
+    codecopy                    // []
+
+    // Set the variables
+    0x00 mload                  // [sushi]
+    [SUSHI_SLOT]                // [SUSHI_SLOT, sushi]
+    sstore                      // []
+
+    0x20 mload                  // [devaddr]
+    [DEVADDR_SLOT]              // [DEVADDR_SLOT, devaddr]
+    sstore                      // []
+
+    0x40 mload                  // [sushiPerBlock]
+    [SUSHI_PER_BLOCK_SLOT]      // [SUSHI_PER_BLOCK_SLOT, sushiPerBlock]
+    sstore                      // []
+
+    0x60 mload                  // [startBlock]
+    [START_BLOCK_SLOT]          // [START_BLOCK_SLOT, startBlock]
+    sstore                      // []
+
+    0x00 mload                  // [bonusEndBlock]
+    [BONUS_END_BLOCK_SLOT]      // [BONUS_END_BLOCK_SLOT, bonusEndBlock]
+    sstore                      // []
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////// FUNCTION DISPATCHER ///////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define macro MAIN() = takes(0) returns(0) {
+    // revert if sent ether
+    NON_PAYABLE()
+
+    // Identify which function is being called
+    0x00 calldataload 0xe0 shr                                                  // [func-sig]
+
+    // dispatch
+    dup1 __FUNC_SIG(poolLength)            eq pool_length_jump                  jumpi
+    dup1 __FUNC_SIG(add)                   eq add_jump                          jumpi
+    dup1 __FUNC_SIG(set)                   eq set_jump                          jumpi
+    dup1 __FUNC_SIG(setMigrator)           eq set_migrator_jump                 jumpi
+    dup1 __FUNC_SIG(migrate)               eq migrate_jump                      jumpi
+    dup1 __FUNC_SIG(getMultiplier)         eq get_multiplier_jump               jumpi
+    dup1 __FUNC_SIG(pendingSushi)          eq pending_sushi_jump                jumpi
+    dup1 __FUNC_SIG(massUpdatePools)       eq mass_update_pools_jump            jumpi
+    dup1 __FUNC_SIG(updatePool)            eq update_pool_jump                  jumpi
+    dup1 __FUNC_SIG(deposit)               eq deposit_jump                      jumpi
+    dup1 __FUNC_SIG(withdraw)              eq withdraw_jump                     jumpi
+    dup1 __FUNC_SIG(emergencyWithdraw)     eq emergency_withdraw_jump           jumpi
+    dup1 __FUNC_SIG(dev)                   eq dev_jump                          jumpi
+
+    // check owned
+    OWNED_MAIN()
+
+    // revert if no match
+    0x00 dup1 revert
+
+    pool_length_jump:
+        POOL_LENGTH()
+    add_jump:
+        ADD()
+    set_jump:
+        SET()
+    set_migrator_jump:
+        SET_MIGRATOR()
+    migrate_jump:
+        MIGRATE()
+    get_multiplier_jump:
+        GET_MULTIPLIER()
+    pending_sushi_jump:
+        PENDING_SUSHI()
+    mass_update_pools_jump:
+        MASS_UPDATE_POOLS()
+    update_pool_jump:
+        UPDATE_POOL()
+    deposit_jump:
+        DEPOSIT()
+    withdraw_jump:
+        WITHDRAW()
+    emergency_withdraw_jump:
+        EMERGENCY_WITHDRAW()
+    dev_jump:
+        DEV()
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////// FUNCTIONS ///////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// returns the number of pools
+#define macro POOL_LENGTH() = takes(0) returns(0) {
+    [POOL_INFO_SLOT] sload          // [poolLength]
+    0x00 mstore                     // []
+    0x20 0x00 return                // []
+}
+
+// Signature = `add(uint256 allocPoint, address lpToken, bool withUpdate)`
+// Add a new lp to the pool. Can only be called by the owner.
+// XXX DO NOT add the same LP token more than once. Rewards will be messed up if you do.
+#define macro ADD() = takes(0) returns(0) {
+    ONLY_OWNER()                        // []
+    0x04 calldataload                   // [allocPoint]
+    0x24 calldataload                   // [lpToken, allocPoint]
+    0x44 calldataload                   // [withUpdate, lpToken, allocPoint]
+    0x00 eq                             // [withUpdate == 0, lpToken, allocPoint]
+    no_update_jump jumpi                // [lpToken, allocPoint]
+        MASS_UPDATE_POOLS()
+
+    no_update_jump:
+    [START_BLOCK_SLOT] sload            // [startBlock, lpToken, allocPoint]
+    dup1                                // [startBlock, startBlock, lpToken, allocPoint]
+    number                              // [block.number, startBlock, startBlock, lpToken, allocPoint]
+    gt                                  // [block.number > startBlock, startBlock, lpToken, allocPoint]
+    iszero                              // [is_not_bigger, startBlock, lpToken, allocPoint]
+    is_not_bigger_jump jumpi            // [startBlock, lpToken, allocPoint]
+        pop                             // [lpToken, allocPoint]
+        number                          // [block.number, lpToken, allocPoint]
+
+    is_not_bigger_jump:                 // [lastRewardBlock, lpToken, allocPoint]
+    swap2                               // [allocPoint, lpToken, lastRewardBlock]
+    dup1                                // [allocPoint, allocPoint, lpToken, lastRewardBlock]
+    [TOTAL_ALLOC_POINT_SLOT] sload      // [totalAllocPoint, allocPoint, allocPoint, lpToken, lastRewardBlock]
+    SAFE_ADD()                          // [totalAllocPoint + allocPoint, allocPoint, lpToken, lastRewardBlock]
+    [TOTAL_ALLOC_POINT_SLOT] sstore     // [allocPoint, lpToken, lastRewardBlock]
+    swap1                               // [lpToken, allocPoint, lastRewardBlock]
+    
+    // poolInfo.push
+    [POOL_INFO_SLOT] dup1 sload         // [poolLength, slot, lpToken, allocPoint, lastRewardBlock]
+    // update poolLength
+    dup1                                // [poolLength, poolLength, slot, lpToken, allocPoint, lastRewardBlock]
+    0x01 add                            // [poolLength + 1, poolLength, slot, lpToken, allocPoint, lastRewardBlock]
+    dup3 sstore                         // [poolLength, slot, lpToken, allocPoint, lastRewardBlock]
+    // compute slot for new poolInfo
+    0x04 mul                            // [4 * poolLength, slot, lpToken, allocPoint, lastRewardBlock]
+    swap1 0x00 mstore                   // [4 * poolLength, lpToken, allocPoint, lastRewardBlock]
+    0x20 0x00 sha3                      // [sha3(slot), 4 * poolLength, lpToken, allocPoint, lastRewardBlock]
+    add                                 // [sha3(slot) + 4 * poolLength, lpToken, allocPoint, lastRewardBlock]
+    // store values
+    swap1 dup2                          // [sha3(slot) + 4 * poolLength, lpToken, sha3(slot) + 4 * poolLength, allocPoint, lastRewardBlock]
+    sstore                              // [sha3(slot) + 4 * poolLength, allocPoint, lastRewardBlock]
+    0x01 add                            // [sha3(slot) + 4 * poolLength + 1, allocPoint, lastRewardBlock]
+    swap1 dup2                          // [sha3(slot) + 4 * poolLength + 1, allocPoint, sha3(slot) + 4 * poolLength + 1, lastRewardBlock]
+    sstore                              // [sha3(slot) + 4 * poolLength + 1, lastRewardBlock]
+    0x01 add                            // [sha3(slot) + 4 * poolLength + 2, lastRewardBlock]
+    sstore                              // []
+    stop
+}
+
+// Signature = `set(uint256 pid, uint256 allocPoint, bool withUpdate)`
+// Update the given pool's SUSHI allocation point. Can only be called by the owner.
+#define macro SET() = takes(0) returns(0) {
+    ONLY_OWNER()                                // []
+    0x04 calldataload                           // [pid]
+    dup1 CHECK_PID()                            // [pid]
+    0x24 calldataload                           // [allocPoint, pid]
+    0x44 calldataload                           // [withUpdate, allocPoint, pid]
+    0x00 eq                                     // [withUpdate == 0, allocPoint, pid]
+    no_update_jump jumpi                        // [allocPoint, pid]
+        MASS_UPDATE_POOLS()
+
+    no_update_jump:                             // [allocPoint, pid]
+    // compute slot for poolInfo[pid].allocPoint
+    swap1 GET_POOL_SLOT(0x00)                   // [pool_slot, allocPoint]
+    0x01 add                                    // [pool_slot + 1, allocPoint]
+    // update totalAllocPoint and poolInfo[pid].allocPoint
+    dup2 dup2                                   // [pool_slot + 1, allocPoint, pool_slot + 1, allocPoint]
+    sload                                       // [poolInfo[pid].allocPoint, allocPoint, pool_slot + 1, allocPoint]
+    [TOTAL_ALLOC_POINT_SLOT] sload              // [totalAllocPoint, poolInfo[pid].allocPoint, allocPoint, pool_slot + 1, allocPoint]
+    SAFE_SUB() SAFE_ADD()                       // [totalAllocPoint - poolInfo[pid].allocPoint + allocPoint, pool_slot + 1, allocPoint]
+    [TOTAL_ALLOC_POINT_SLOT] sstore             // [pool_slot + 1, allocPoint]
+    sstore                                      // []
+    stop
+}
+
+// Signature = `setMigrator(address migrator)`
+// Set the migrator contract. Can only be called by the owner.
+#define macro SET_MIGRATOR() = takes(0) returns(0) {
+    ONLY_OWNER()                                // []
+    0x04 calldataload                           // [migrator]
+    [MIGRATOR_SLOT] sstore                      // []
+    stop
+}
+
+// Signature = `migrate(uint256 pid)`
+// Migrate lp token to another lp contract. Can be called by anyone. We trust that migrator contract is good.
+#define macro MIGRATE() = takes(0) returns(0) {
+    // check migrator
+    [MIGRATOR_SLOT] sload dup1                          // [migrator, migrator]
+    0x00 eq                                             // [migrator == address(0), migrator]
+    iszero                                              // [migrator != address(0), migrator]
+    is_not_zero_jump jumpi                              // [migrator]
+        // revert with "NoMigrator"
+        __ERROR(NoMigrator) 0x00 mstore                 // [migrator]
+        0x04 0x00 revert
+    
+    is_not_zero_jump: 
+    0x04 calldataload                                   // [pid, migrator]
+    dup1 CHECK_PID()                                    // [pid, migrator]
+    GET_POOL_SLOT(0x00)                                 // [pool_slot, migrator]
+    dup1 sload                                          // [pool.lpToken, pool_slot, migrator]
+                                                
+    // call lpToken.balanceOf(address(this))
+    dup1                                                // [pool.lpToken, pool.lpToken, pool_slot, migrator]
+    address                                             // [address(this), pool.lpToken, pool.lpToken, pool_slot, migrator]
+    ERC20_BALANCE_OF(0x00)                              // [balance, pool.lpToken, pool_slot, migrator], memory: [balance]
+    dup2                                                // [pool.lpToken, balance, pool.lpToken, pool_slot, migrator], memory: [balance]
+    swap1                                               // [balance, pool.lpToken, pool.lpToken, pool_slot, migrator], memory: [balance]
+    dup5                                                // [migrator, balance, pool.lpToken, pool.lpToken, pool_slot, migrator], memory: [balance]
+    SAFE_APPROVE(0x20)                                  // [pool.lpToken, pool_slot, migrator], memory: [balance]
+    
+    // call migrator.migrate(lpToken)
+    __RIGHTPAD(0xce5494bb) 0x20 mstore                  // [pool.lpToken, pool_slot, migrator], memory: [balance]
+    0x24 mstore                                         // [pool_slot, migrator], memory: [balance]
+    swap1                                               // [migrator, pool_slot], memory: [balance]
+    0x20 0x24 0x20 0x00 0x20                            // [outsize, value, in, insize, out, migrator, pool_slot], memory: [balance]
+    swap5 gas                                           // [gas, migrator, value, in, insize, out, outsize, pool_slot], memory: [balance]
+    call                                                // [success, pool_slot], memory: [balance, newLpToken]
+    iszero call_failed_jump jumpi                       // [pool_slot], memory: [balance, newLpToken]
+    returndatasize                                      // [returndatasize, pool_slot], memory: [balance, newLpToken]
+    iszero return_data_size_is_zero_jump jumpi          // [pool_slot], memory: [balance, newLpToken]
+
+    // call newLpToken.balanceOf(address(this)
+    0x20 mload                                          // [newLpToken, pool_slot], memory: [balance, newLpToken]
+    address                                             // [address(this), newLpToken, pool_slot], memory: [balance, newLpToken]
+    ERC20_BALANCE_OF(0x40)                              // [newLpToken_balance, pool_slot], memory: [balance, newLpToken, newLpToken_balance]
+    
+    // check lpToken balances
+    0x00 mload                                          // [lpToken_balance, newLpToken_balance, pool_slot], memory: [lpToken_balance, newLpToken, newLpToken_balance]
+    eq                                                  // [lpToken_balance == newLpToken_balance , pool_slot], memory: [lpToken_balance, newLpToken, newLpToken_balance]
+    balances_equal_jump jumpi                           // [pool_slot], memory: [lpToken_balance, newLpToken, newLpToken_balance]
+        // revert with "BadMigrate"
+        __ERROR(ReturnDataSizeIsZero) 0x00 mstore       // [pool_slot]
+        0x04 0x00 revert
+    
+    balances_equal_jump:                                // [pool_slot]
+    // update pool.lpToken
+    0x20 mload                                          // [newLpToken, pool_slot]
+    swap1 sstore                                        // []
+    stop
+}
+
+// Signature = `getMultiplier(uint256 from, uint256 to)`
+// Return reward multiplier over the given _from to _to block.
+#define macro GET_MULTIPLIER() = takes(0) returns(0) {
+    0x04 calldataload                   // [from]
+    0x24 calldataload                   // [to, from]
+    INNER_GET_MULTIPLIER()              // [multiplier]
+    0x00 mstore                         // []
+    0x20 0x00 return
+}
+
+// Signature = `pendingSushi(uint256 pid, address user)`
+// View function to see pending SUSHIs on frontend.
+#define macro PENDING_SUSHI() = takes(0) returns(0) {
+    0x04 calldataload dup1                              // [pid, pid]
+    CHECK_PID()                                         // [pid]
+    GET_POOL_SLOT(0x00)                                 // [pool_slot]
+    
+    // get lpToken and accSushiPerShare
+    dup1 0x03 add                                       // [pool_slot + 3, pool_slot]
+    sload                                               // [accSushiPerShare, pool_slot]
+
+    // call pool.lpToken.balanceOf(address(this))
+    dup2 sload                                          // [pool.lpToken, accSushiPerShare, pool_slot]
+    address                                             // [address(this), pool.lpToken, accSushiPerShare, pool_slot]
+    ERC20_BALANCE_OF(0x00)                              // [lpSupply, accSushiPerShare, pool_slot]
+
+    dup3 0x02 add                                       // [pool_slot + 2, lpSupply, accSushiPerShare, pool_slot]
+    sload dup1                                          // [lastRewardBlock, lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+    number gt                                           // [block.number > lastRewardBlock, lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+    dup3                                                // [lpSupply, block.number > lastRewardBlock, lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+    and                                                 // [block.number > lastRewardBlock && lpSupply != 0, lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+    iszero                                              // [!(block.number > lastRewardBlock && lpSupply != 0), lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+    condition_is_false_jump jumpi                       // [lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+        number                                          // [block.number, lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+        INNER_GET_MULTIPLIER()                          // [multiplier, lpSupply, accSushiPerShare, pool_slot]
+        // compute sushiReward
+        [SUSHI_PER_BLOCK_SLOT] sload                    // [sushiPerBlock, multiplier, lpSupply, accSushiPerShare, pool_slot]
+        SAFE_MUL()                                      // [multiplier * sushiPerBlock, lpSupply, accSushiPerShare, pool_slot]
+        dup4 0x01 add                                   // [pool_slot + 1, multiplier * sushiPerBlock, lpSupply, accSushiPerShare, pool_slot]
+        sload                                           // [allocPoint, multiplier * sushiPerBlock, lpSupply, accSushiPerShare, pool_slot]
+        SAFE_MUL()                                      // [multiplier * sushiPerBlock * allocPoint, lpSupply, accSushiPerShare, pool_slot]
+        [TOTAL_ALLOC_POINT_SLOT] sload                  // [totalAllocPoint, multiplier * sushiPerBlock * allocPoint, lpSupply, accSushiPerShare, pool_slot]
+        swap1 SAFE_DIV()                                // [sushiReward, lpSupply, accSushiPerShare, pool_slot]
+
+        // compute accSushiPerShare
+        [1E_12] SAFE_MUL() SAFE_DIV()                   // [sushiReward * 1e12 / lpSupply, accSushiPerShare, pool_slot]
+        SAFE_ADD()                                      // [accSushiPerShare + sushiReward * 1e12 / lpSupply, pool_slot]
+        swap1 pop                                       // [accSushiPerShare]
+        end_jump jump                                   
+    
+    condition_is_false_jump:                            // [lastRewardBlock, lpSupply, accSushiPerShare, pool_slot]
+        pop pop                                         // [accSushiPerShare, pool_slot]
+        swap1 pop                                       // [accSushiPerShare]
+
+    end_jump:                                           // [accSushiPerShare]
+    [1E_12]                                             // [1e12, accSushiPerShare]
+    0x24 calldataload                                   // [user, 1e12, accSushiPerShare]
+    0x04 calldataload                                   // [pid, user, 1e12, accSushiPerShare]
+    [USER_INFO_SLOT]                                    // [user_info_slot, pid, user, 1e12, accSushiPerShare]
+    GET_SLOT_FROM_KEYS_2D(0x00)                         // [slot, 1e12, accSushiPerShare]
+    dup1 sload                                          // [user.amount, slot, 1e12, accSushiPerShare]
+    swap1 0x01 add                                      // [slot + 1, user.amount, 1e12, accSushiPerShare]
+    sload                                               // [user.rewardDebt, user.amount, 1e12, accSushiPerShare]
+    swap3                                               // [accSushiPerShare, user.amount, 1e12, user.rewardDebt]
+    SAFE_MUL() SAFE_DIV() SAFE_SUB()                    // [user.amount * accSushiPerShare / 1e12 - user.rewardDebt]
+    0x00 mstore                                         // []
+    0x20 0x00 return
+}
+
+// Signature = `massUpdatePools()`
+// Update reward variables for all pools. Be careful of gas spending!
+#define macro MASS_UPDATE_POOLS() = takes(0) returns(0) {
+    [POOL_INFO_SLOT] sload      // [length]
+    // if length == 0
+    dup1 0x00                   // [0, length, length]
+    eq end_jump jumpi           // [length]
+
+    0x00                        // [index(0), length]
+    start_jump jump
+    continue_jump:
+        // if index == length, break
+        eq end_jump jumpi       // [index(i), length]
+        start_jump:
+        dup1                    // [index(i), index(i), length]
+        INNER_UPDATE_POOL()     // [index(i), length]
+        // increment index
+        0x01 add                // [index(i+1), length]
+        dup2 dup2               // [index(i+1), length, index(i+1), length]
+        continue_jump jump
+
+    end_jump:
+    stop
+}
+
+// Signature = `updatePool(uint256 pid)`
+// Update reward variables of the given pool to be up-to-date.
+#define macro UPDATE_POOL() = takes(0) returns(0) {
+    0x04 calldataload dup1      // [pid, pid]
+    CHECK_PID()                 // [pid]
+    INNER_UPDATE_POOL()         // []
+    stop
+}
+
+// Signature = `deposit(uint256 pid, uint256 amount)`
+// Deposit LP tokens to MasterChef for SUSHI allocation.
+#define macro DEPOSIT() = takes(0) returns(0) {
+    0x24 calldataload                       // [amount]
+    0x04 calldataload dup1                  // [pid, pid, amount]
+    CHECK_PID()                             // [pid, amount]
+    dup1                                    // [pid, pid, amount]
+    INNER_UPDATE_POOL()                     // [pid, amount]
+
+    // if user.amount > 0
+    dup1 GET_POOL_SLOT(0x00)                // [pool_slot, pid, amount]
+    dup3 dup3                               // [pid, amount, pool_slot, pid, amount]
+    [USER_INFO_SLOT]                        // [slot, pid, amount, pool_slot, pid, amount]
+    GET_SLOT_FROM_KEYS_2D(0x00)             // [user_slot, pool_slot, pid, amount]
+    dup1 sload                              // [user.amount, user_slot, pool_slot, pid, amount]
+    dup1 iszero                             // [user.amount == 0, user.amount, user_slot, pool_slot, pid, amount]
+    user_amount_zero_jump jumpi             // [user.amount, user_slot, pool_slot, pid, amount]
+        dup1 [1E_12]                        // [1e12, user.amount, user.amount, user_slot, pool_slot, pid, amount]
+        dup5 0x03 add sload                 // [pool.accSushiPerShare, 1e12, user.amount, user.amount, user_slot, pool_slot, pid, amount]
+        dup5 0x01 add sload                 // [user.rewardDebt, pool.accSushiPerShare, 1e12, user.amount, user.amount, user_slot, pool_slot, pid, amount]
+        swap3                               // [user.amount, pool.accSushiPerShare, 1e12, user.rewardDebt, user.amount, user_slot, pool_slot, pid, amount]
+        SAFE_MUL() SAFE_DIV() SAFE_SUB()    // [user.amount * pool.accSushiPerShare / 1e12 - user.rewardDebt, user.amount, user_slot, pool_slot, pid, amount]
+        caller                              // [msg.sender, pending, user.amount, user_slot, pool_slot, pid, amount]
+        SAFE_SUSHI_TRANSFER(0x00)           // [user.amount, user_slot, pool_slot, pid, amount]
+
+    user_amount_zero_jump:
+    // call pool.lpToken.safeTransferFrom   // [user.amount, user_slot, pool_slot, pid, amount]
+    dup3 sload                              // [pool.lpToken, user.amount, user_slot, pool_slot, pid, amount]
+    dup6 address caller                     // [msg.sender, address(this), amount, pool.lpToken, user.amount, user_slot, pool_slot, pid, amount]
+    SAFE_TRANSFER_FROM(0x00)                // [user.amount, user_slot, pool_slot, pid, amount]
+    
+    // update user.amount and user.rewardDebt
+    dup1                                    // [user.amount, user.amount, user_slot, pool_slot, pid, amount]
+    dup6 SAFE_ADD()                         // [user.amount + amount, user.amount, user_slot, pool_slot, pid, amount]
+    dup3 sstore                             // [user.amount, user_slot, pool_slot, pid, amount]
+    [1E_12]                                 // [1e12, user.amount, user_slot, pool_slot, pid, amount]
+    swap1                                   // [user.amount, 1e12, user_slot, pool_slot, pid, amount]
+    dup4 0x03 add sload                     // [pool.accSushiPerShare, user.amount, 1e12, user_slot, pool_slot, pid, amount]
+    SAFE_MUL() SAFE_DIV()                   // [pool.accSushiPerShare * user.amount / 1e12, user_slot, pool_slot, pid, amount]
+    dup2 0x01 add sstore                    // [user_slot, pool_slot, pid, amount]
+    
+    // emit Deposit event
+    pop pop swap1                           // [amount, pid]
+    0x00 mstore                             // [pid]
+    caller                                  // [msg.sender, pid]
+    __EVENT_HASH(Deposit)                   // [sig, msg.sender, pid]
+    0x20 0x00 log3                          // []
+    stop
+}
+
+// Signature = `withdraw(uint256 pid, uint256 amount)`
+// Withdraw LP tokens from MasterChef.
+#define macro WITHDRAW() = takes(0) returns(0) {
+    0x24 calldataload                                   // [amount]
+    0x04 calldataload dup1                              // [pid, pid, amount]
+    CHECK_PID()                                         // [pid, amount]
+    dup2 dup2                                           // [pid, amount, pid, amount]
+    [USER_INFO_SLOT]                                    // [slot, pid, amount, pid, amount]
+    GET_SLOT_FROM_KEYS_2D(0x00)                         // [user_slot, pid, amount]
+    dup1 sload                                          // [user.amount, user_slot, pid, amount]
+    dup1                                                // [user.amount, user.amount, user_slot, pid, amount]
+    dup5                                                // [amount, user.amount, user.amount, user_slot, pid, amount]
+    gt                                                  // [amount > user.amount, user.amount, user_slot, pid, amount]
+    iszero                                              // [user.amount >= amount, user.amount, user_slot, pid, amount]
+    continue_jump jumpi                                 // [user.amount, user_slot, pid, amount]
+        // revert with "WithdrawNotGood"
+        __ERROR(WithdrawNotGood) 0x00 mstore            // [user.amount, user_slot, pid, amount]
+        0x04 0x00 revert
+    
+    continue_jump:                                      // [user.amount, user_slot, pid, amount]
+    dup3                                                // [pid, user.amount, user_slot, pid, amount]
+    INNER_UPDATE_POOL()                                 // [user.amount, user_slot, pid, amount]
+    
+    // compute pending
+    dup3 GET_POOL_SLOT(0x00)                            // [pool_slot, user.amount, user_slot, pid, amount]
+    dup2                                                // [user.amount, pool_slot, user.amount, user_slot, pid, amount]
+    dup4 0x01 add sload                                 // [user.rewardDebt, user.amount, pool_slot, user.amount, user_slot, pid, amount]
+    [1E_12]                                             // [1e12, user.rewardDebt, user.amount, pool_slot, user.amount, user_slot, pid, amount]
+    dup4 0x03 add sload                                 // [pool.accSushiPerShare, 1e12, user.rewardDebt, user.amount, pool_slot, user.amount, user_slot, pid, amount]
+    dup1                                                // [pool.accSushiPerShare, pool.accSushiPerShare, 1e12, user.rewardDebt, user.amount, pool_slot, user.amount, user_slot, pid, amount]
+    swap4                                               // [user.amount, pool.accSushiPerShare, 1e12, user.rewardDebt, pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    SAFE_MUL() SAFE_DIV() SAFE_SUB()                    // [pending, pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    
+    caller                                              // [msg.sender, pending, pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    SAFE_SUSHI_TRANSFER(0x00)                           // [pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    
+    // update user.amount
+    dup6                                                // [amount, pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    dup4                                                // [user.amount, amount, pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    sub                                                 // [user.amount - amount, pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    dup4 sstore                                         // [pool.accSushiPerShare, pool_slot, user.amount, user_slot, pid, amount]
+    
+    // update user.rewardDebt
+    [1e12] swap1                                        // [pool.accSushiPerShare, 1e12, pool_slot, user.amount, user_slot, pid, amount]
+    dup4                                                // [user.amount, pool.accSushiPerShare, 1e12, pool_slot, user.amount, user_slot, pid, amount]
+    SAFE_MUL() SAFE_DIV()                               // [user.amount * pool.accSushiPerShare / 1e12, pool_slot, user.amount, user_slot, pid, amount]
+    dup4 0x01 add sstore                                // [pool_slot, user.amount, user_slot, pid, amount]
+    sload                                               // [pool.lpToken, user.amount, user_slot, pid, amount]
+    dup5                                                // [amount, pool.lpToken, user.amount, user_slot, pid, amount]
+    caller                                              // [msg.sender, amount, pool.lpToken, user.amount, user_slot, pid, amount]
+    SAFE_TRANSFER(0x00)                                 // [user.amount, user_slot, pid, amount]
+    
+    // emit Withdraw
+    swap3                                               // [amount, user_slot, pid, user.amount]
+    0x00 mstore                                         // [user_slot, pid, user.amount]
+    pop                                                 // [pid, user.amount]
+    caller                                              // [msg.sender, pid, user.amount]
+    __EVENT_HASH(Withdraw)                              // [sig, msg.sender, pid, user.amount]
+    0x20 0x00 log3                                      // [user.amount]
+    stop
+}
+
+// Signature = `emergencyWithdraw(uint256 pid)`
+// Withdraw without caring about rewards. EMERGENCY ONLY.
+#define macro EMERGENCY_WITHDRAW() = takes(0) returns(0) {
+    0x04 calldataload                   // [pid]
+    dup1 CHECK_PID()                    // [pid]
+    caller                              // [msg.sender, pid]
+    dup2 [USER_INFO_SLOT]               // [slot, pid, msg.sender, pid]
+    GET_SLOT_FROM_KEYS_2D()             // [user_slot, pid]
+    dup1 sload                          // [user.amount, user_slot, pid]
+    dup3 GET_POOL_SLOT(0x00)            // [pool_slot, user.amount, user_slot, pid]
+    sload                               // [pool.lpToken, user.amount, user_slot, pid]
+    dup2                                // [user.amount, pool.lpToken, user.amount, user_slot, pid]
+    caller                              // [msg.sender, user.amount, pool.lpToken, user.amount, user_slot, pid]
+    SAFE_TRANSFER(0x00)                 // [user.amount, user_slot, pid]
+
+    // emit EmergencyWithdraw
+    0x00 mstore                         // [user_slot, pid]
+    swap1                               // [pid, user_slot]
+    caller                              // [msg.sender, pid, user_slot]
+    __EVENT_HASH(EmergencyWithdraw)     // [sig, msg.sender, pid, user_slot]
+    0x20 0x00 log3                      // [user_slot]
+    
+    // update user.amount and user.rewardDebt
+    0x00 dup2 sstore                    // [user_slot]
+    0x00 swap1                          // [user_slot, 0x00]
+    0x01 add sstore                     // []
+    stop
+}
+
+// Update dev address by the previous dev.
+#define macro DEV() = takes(0) returns(0) {
+    // check only dev
+    [DEVADDR_SLOT] sload                    // [devaddr]
+    caller eq only_dev_jump jumpi           // []
+     
+    // revert with "Unauthorized"
+    __ERROR(Unauthorized) 0x00 mstore       // []
+    0x04 0x00 revert
+
+    only_dev_jump:                          // []
+
+    // Set the new dev address
+    0x04 calldataload                       // [_devaddr]
+    [DEVADDR_SLOT] sstore                   // []
+    stop
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////// INTERNAL & HELPERS ////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Only owner modifier
+#define macro ONLY_OWNER() = takes (0) returns (0) {
+    [OWNER] sload                                          // [owner]
+    caller eq ONLY_OWNER_continue jumpi                    // []
+     
+    // revert with "Unauthorized"
+    __ERROR(Unauthorized) 0x00 mstore
+    0x04 0x00 revert
+
+    ONLY_OWNER_continue:                                   // []
+}
+
+#define macro INNER_GET_MULTIPLIER() = takes(2) returns(1) {
+    // input stack                      // [to, from]
+    [BONUS_END_BLOCK_SLOT] sload dup1   // [bonusEndBlock, bonusEndBlock, to, from]
+    dup3                                // [to, bonusEndBlock, bonusEndBlock, to, from]
+    gt                                  // [to > bonusEndBlock, bonusEndBlock, to, from]
+    to_is_bigger_jump jumpi             // [bonusEndBlock, to, from]
+        pop                             // [to, from]
+        SAFE_SUB()                      // [to - from]
+        [BONUS_MULTIPLIER] SAFE_MUL()   // [(to - from) * BONUS_MULTIPLIER]
+        end_jump jump
+
+    to_is_bigger_jump:                  // [bonusEndBlock, to, from]
+    dup1 dup4                           // [from, bonusEndBlock, bonusEndBlock, to, from]
+    lt                                  // [from < bonusEndBlock, bonusEndBlock, to, from]
+    from_is_smaller_jump jumpi          // [bonusEndBlock, to, from]
+        pop                             // [to, from]
+        SAFE_SUB()                      // [to - from]
+        end_jump jump
+
+    from_is_smaller_jump:               // [bonusEndBlock, to, from]
+    swap2                               // [from, to, bonusEndBlock]
+    dup3                                // [bonusEndBlock, from, to, bonusEndBlock]
+    SAFE_SUB()                          // [bonusEndBlock - from, to, bonusEndBlock]
+    [BONUS_MULTIPLIER] SAFE_MUL()       // [(bonusEndBlock - from) * BONUS_MULTIPLIER, to, bonusEndBlock]
+    swap2 swap1                         // [to, bonusEndBlock, (bonusEndBlock - from) * BONUS_MULTIPLIER]
+    SAFE_SUB()                          // [to - bonusEndBlock, (bonusEndBlock - from) * BONUS_MULTIPLIER]
+    SAFE_ADD()                          // [(bonusEndBlock - from) * BONUS_MULTIPLIER + (to - bonusEndBlock)]
+    
+    end_jump:
+}
+
+#define macro ERC20_BALANCE_OF(mem_ptr) = takes(2) returns(1) {
+    // input stack                                      // [address, token]
+    // call token.balanceOf(address)
+    __RIGHTPAD(0x70a08231) <mem_ptr>                    // [mem_ptr, balanceOf_selector, address, token]
+    mstore                                              // [address, token]
+    <mem_ptr> 0x04 add                                  // [mem_ptr + 0x04, address, token]
+    mstore                                              // [token]
+    <mem_ptr> 0x24 <mem_ptr> 0x20                       // [outsize, in, insize, out, token]
+    swap4                                               // [token, in, insize, out, outsize]
+    gas staticcall                                      // [success]
+    call_success_jump jumpi                             // []  
+        // revert with "CallFailed"
+        __ERROR(CallFailed) <mem_ptr> mstore            // []
+        0x04 <mem_ptr> revert
+    
+    call_success_jump:                      
+    returndatasize                                      // [returndatasize]
+    size_is_not_zero_jump jumpi                         // []
+        // revert with "ReturnDataSizeIsZero"
+        __ERROR(ReturnDataSizeIsZero) <mem_ptr> mstore  // 
+        0x04 <mem_ptr> revert
+    
+    size_is_not_zero_jump:
+    <mem_ptr> mload                                     // [balance]
+}
+
+#define macro SUSHI_MINT(mem_ptr) = takes(3) returns(0) {
+    // input stack                                      // [address, amount, sushi]
+    // call sushi.mint(address,uint256)
+    __RIGHTPAD(0x40c10f19) <mem_ptr>                    // [mem_ptr, mint_selector, address, amount, sushi]
+    mstore                                              // [address, amount, sushi]
+    <mem_ptr> 0x04 add                                  // [mem_ptr + 0x04, address, amount, sushi]
+    mstore                                              // [amount, sushi]
+    <mem_ptr> 0x24 add                                  // [mem_ptr + 0x24, amount, sushi]
+    mstore                                              // [sushi]
+    <mem_ptr> 0x44 <mem_ptr> 0x00 0x00                  // [outsize, value, in, insize, out, sushi]
+    swap5                                               // [sushi, value, in, insize, out, outsize]
+    gas call                                            // [success]
+    call_success_jump jumpi                             // []  
+        // revert with "CallFailed"
+        __ERROR(CallFailed) <mem_ptr> mstore            // []
+        0x04 <mem_ptr> revert
+    
+    call_success_jump:
+}
+
+#define macro INNER_UPDATE_POOL() = takes(1) returns() {
+    // input stack                                      // [pid]
+    GET_POOL_SLOT(0x00)                                 // [pool_slot]
+    dup1 0x02 add                                       // [pool_slot + 2, pool_slot]
+    sload dup1                                          // [pool.lastRewardBlock, pool.lastRewardBlock, pool_slot]
+    number                                              // [block.number, pool.lastRewardBlock, pool.lastRewardBlock, pool_slot]
+    gt                                                  // [block.number > pool.lastRewardBlock, pool.lastRewardBlock, pool_slot]
+    block_number_bigger_jump jumpi                      // [pool.lastRewardBlock, pool_slot]
+        0x00 dup1 return
+
+    block_number_bigger_jump:                           // [pool.lastRewardBlock, pool_slot]
+    swap1 dup1 sload                                    // [pool.lpToken, pool_slot, pool.lastRewardBlock]
+    address                                             // [address(this), pool.lpToken, pool_slot, pool.lastRewardBlock]
+    ERC20_BALANCE_OF(0x00)                              // [lpSupply, pool_slot, pool.lastRewardBlock]
+    dup1                                                // [lpSupply, lpSupply, pool_slot, pool.lastRewardBlock]
+    lp_supply_not_zero_jump jumpi                       // [lpSupply, pool_slot, pool.lastRewardBlock]
+        pop 0x02 add                                    // [pool_slot + 2, pool.lastRewardBlock]
+        number swap1                                    // [pool_slot + 2, block.number, pool.lastRewardBlock]
+        sstore                                          // [pool.lastRewardBlock]
+        0x00 dup1 return
+    
+    lp_supply_not_zero_jump:                            // [lpSupply, pool_slot, pool.lastRewardBlock]
+    swap2 number                                        // [block.number, pool.lastRewardBlock, pool_slot, lpSupply]
+    INNER_GET_MULTIPLIER()                              // [multiplier, pool_slot, lpSupply]
+    
+    // compute sushiReward
+    [SUSHI_PER_BLOCK_SLOT] sload                        // [sushiPerBlock, multiplier, pool_slot, lpSupply]
+    SAFE_MUL()                                          // [multiplier * sushiPerBlock, pool_slot, lpSupply]
+    dup2                                                // [pool_slot, multiplier * sushiPerBlock, pool_slot, lpSupply]
+    0x01 add sload                                      // [pool.allocPoint, multiplier * sushiPerBlock, pool_slot, lpSupply]
+    SAFE_MUL()                                          // [multiplier * sushiPerBlock * pool.allocPoint, pool_slot, lpSupply]
+    [TOTAL_ALLOC_POINT_SLOT] sload swap1                // [multiplier * sushiPerBlock * pool.allocPoint, totalAllocPoint, pool_slot, lpSupply]
+    SAFE_DIV()                                          // [sushiReward, pool_slot, lpSupply]
+    
+    // mint sushi
+    [SUSHI_SLOT] sload dup1                             // [sushi, sushi, sushiReward, pool_slot, lpSupply]
+    0x0a dup4                                           // [sushiReward, 10, sushi, sushi, sushiReward, pool_slot, lpSupply]
+    SAFE_DIV()                                          // [sushiReward / 10, sushi, sushi, sushiReward, pool_slot, lpSupply]
+    [DEVADDR_SLOT] sload                                // [devaddr, sushiReward / 10, sushi, sushi, sushiReward, pool_slot, lpSupply]
+    SUSHI_MINT(0x00)                                    // [sushi, sushiReward, pool_slot, lpSupply]
+    dup2 address                                        // [address(this), sushiReward, sushi, sushiReward, pool_slot, lpSupply]
+    SUSHI_MINT(0x00)                                    // [sushiReward, pool_slot, lpSupply]
+    
+    // update pool.accSushiPerShare and pool.lastRewardBlock 
+    swap1 swap2 swap1                                   // [sushiReward, lpSupply, pool_slot]
+    [1E_12] SAFE_MUL() SAFE_DIV()                       // [1e12 * sushiReward / lpSupply, pool_slot]
+    dup2 0x03 add sload                                 // [pool.accSushiPerShare, 1e12 * sushiReward / lpSupply, pool_slot]
+    SAFE_ADD()                                          // [pool.accSushiPerShare + 1e12 * sushiReward / lpSupply, pool_slot]
+    dup2 0x03 add sstore                                // [pool_slot]
+    number                                              // [block.number, pool_slot]
+    swap1 0x02 add sstore                               // []
+}
+
+#define macro CHECK_PID() = takes(1) returns(0) {
+    // input stack                                      // [pid]
+    // check pid < poolLength
+    [POOL_INFO_SLOT] sload                              // [poolLength, pid]
+    gt                                                  // [poolLength > pid]
+    is_not_out_of_bounds_jump jumpi                     // [slot, pid]
+        // revert with "OutOfBounds"
+        __ERROR(OutOfBounds) 0x00 mstore                // [slot, pid]
+        0x04 0x00 revert
+
+    is_not_out_of_bounds_jump:                          // []
+}
+
+#define macro GET_POOL_SLOT(mem_ptr) = takes(1) returns(1) {
+    // input stack                                      // [pid]
+    [POOL_INFO_SLOT]                                    // [slot, pid]
+    <mem_ptr> mstore                                    // [pid]
+    0x04 mul                                            // [4 * pid]
+    0x20 <mem_ptr> sha3                                 // [sha3(slot), 4 * pid]
+    add                                                 // [pool_slot]
+}
+
+#define macro SAFE_SUSHI_TRANSFER(mem_ptr) = takes(2) returns(0) {
+    // input stack                  // [to, amount]
+    [SUSHI_SLOT] sload dup1         // [sushi, sushi, to, amount]
+    address                         // [address(this), sushi, sushi, to, amount]
+    ERC20_BALANCE_OF(<mem_ptr>)     // [sushiBal, sushi, to, amount]
+    dup1 dup5 gt                    // [amount > sushiBal, sushiBal, sushi, to, amount]
+    amount_bigger_jump jumpi        // [sushiBal, sushi, to, amount]
+        pop                         // [sushi, to, amount]
+        swap2                       // [amount, to, sushi]
+        swap1                       // [to, amount, sushi]
+        SUSHI_TRANSFER(<mem_ptr>)   // []
+        
+        end_jump jump
+
+    amount_bigger_jump:             // [sushiBal, sushi, to, amount]
+        swap1                       // [sushi, sushiBal, to, amount]
+        swap2                       // [to, sushiBal, sushi, amount]
+        SUSHI_TRANSFER(<mem_ptr>)   // [amount]
+        pop                         // []
+
+    end_jump:
+}
+
+#define macro SUSHI_TRANSFER(mem_ptr) = takes(3) returns(0) {
+    // input stack                                      // [address, amount, sushi]
+    // call sushi.mint(address,uint256)
+    __RIGHTPAD(0xa9059cbb) <mem_ptr>                    // [mem_ptr, mint_selector, address, amount, sushi]
+    mstore                                              // [address, amount, sushi]
+    <mem_ptr> 0x04 add                                  // [mem_ptr + 0x04, address, amount, sushi]
+    mstore                                              // [amount, sushi]
+    <mem_ptr> 0x24 add                                  // [mem_ptr + 0x24, amount, sushi]
+    mstore                                              // [sushi]
+    <mem_ptr> 0x44 <mem_ptr> 0x00 0x00                  // [outsize, value, in, insize, out, sushi]
+    swap5                                               // [sushi, value, in, insize, out, outsize]
+    gas call                                            // [success]
+    call_success_jump jumpi                             // []  
+        // revert with "CallFailed"
+        __ERROR(CallFailed) <mem_ptr> mstore            // []
+        0x04 <mem_ptr> revert
+    
+    call_success_jump:
+}
